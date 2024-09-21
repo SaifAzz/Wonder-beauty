@@ -1,0 +1,78 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum DriverStatus {
+  AVAILABLE
+  BUSY
+  OFFLINE
+}
+
+enum OrderStatus {
+  PENDING
+  ASSIGNED
+  COMPLETED
+  CANCELLED
+}
+
+enum NotificationStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+  EXPIRED
+}
+
+model User {
+  id        Int      @id @default(autoincrement())
+  email     String   @unique
+  password  String
+}
+
+model Driver {
+  id        Int      @id @default(autoincrement())
+  name      String
+  status    DriverStatus @default(AVAILABLE)
+  priority  Int
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  orders    Order[] 
+  Notification Notification[]
+}
+
+model Order {
+  id          Int      @id @default(autoincrement())
+  origin      String
+  destination String
+  customer    String
+  driverId    Int?
+  driver      Driver?  @relation(fields: [driverId], references: [id])
+  status      OrderStatus @default(PENDING)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  logEntries  LogEntry[]
+  Notification Notification[]
+}
+
+model LogEntry {
+  id        Int      @id @default(autoincrement())
+  orderId   Int
+  order     Order    @relation(fields: [orderId], references: [id])
+  action    String  
+  timestamp DateTime @default(now())
+}
+
+model Notification {
+  id             Int      @id @default(autoincrement())
+  orderId        Int
+  order          Order    @relation(fields: [orderId], references: [id])
+  driverId       Int
+  driver         Driver   @relation(fields: [driverId], references: [id])
+  status         NotificationStatus @default(PENDING)
+  responseDeadline DateTime
+  createdAt      DateTime @default(now())
+}
