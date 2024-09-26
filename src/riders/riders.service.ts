@@ -1,13 +1,17 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { Driver, Order, Prisma } from '@prisma/client';
 import { PrismaService } from 'nestjs-prisma';
-import { CreateRiderDto } from './rider.dto';
-
+import { DriverNotNotifiedException } from 'src/customErrors/DriverNotFoundError';
+import { CACHE_MANAGER } from '@nestjs/cache-manager';
+import { Cache } from 'cache-manager';
 @Injectable()
 export class RideService {
   private queue: Driver[] = [];
 
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    @Inject(CACHE_MANAGER) private cacheManager: Cache,
+  ) {}
 
   async createDriver(
     createDriverDto: Prisma.DriverCreateInput,
@@ -21,9 +25,9 @@ export class RideService {
     origin: string,
     destination: string,
     customer: string,
-  ): Promise<Order> {
+  ): Promise<any> {
     const order = await this.prisma.order.create({
-      data: { origin, destination, customer, status: 'COMPLETED' },
+      data: { origin, destination, customer, status: 'PENDING' },
     });
 
     await this.prisma.logEntry.create({
@@ -33,10 +37,15 @@ export class RideService {
       },
     });
 
-    this.queue = await this.prisma.driver.findMany({
-      where: { status: 'AVAILABLE' },
-      orderBy: { priority: 'asc' },
-    });
+    this.queue = await this.cacheManager.get<Driver[]>('driverQueue');
+
+    if (!this.queue || this.queue.length === 0) {
+      this.queue = await this.prisma.driver.findMany({
+        where: { status: 'AVAILABLE' },
+        orderBy: { priority: 'asc' },
+      });
+      await this.cacheManager.set('driverQueue', this.queue, 600);
+    }
 
     this.notifyDriver(order.id);
 
@@ -53,11 +62,24 @@ export class RideService {
     });
     if (!order) throw new NotFoundException('Order not found');
 
+    const notification = await this.prisma.notification.findFirst({
+      where: {
+        orderId,
+        driverId,
+        status: 'PENDING',
+      },
+    });
+
+    if (!notification) {
+      throw new DriverNotNotifiedException(driverId, orderId);
+    }
+
     if (response === 'accept') {
       await this.prisma.order.update({
         where: { id: orderId },
         data: { driverId, status: 'ASSIGNED' },
       });
+
       await this.prisma.driver.update({
         where: { id: driverId },
         data: { status: 'BUSY' },
@@ -74,11 +96,12 @@ export class RideService {
         where: { orderId, driverId },
         data: { status: 'ACCEPTED' },
       });
+
       this.queue = this.queue.filter((driver) => driver.id !== driverId);
+      await this.cacheManager.set('driverQueue', this.queue, 600);
 
       return { status: 'Order assigned', driverId };
     } else {
-      console.log(`Driver ${driverId} rejected the order`);
       await this.prisma.logEntry.create({
         data: {
           orderId,
@@ -90,13 +113,16 @@ export class RideService {
   }
 
   async notifyDriver(orderId: number, retry = false) {
-    if (this.queue.length === 0) {
+    this.queue = await this.cacheManager.get<Driver[]>('driverQueue');
+
+    if (!this.queue || this.queue.length === 0) {
       if (!retry) {
         console.log('Retrying with extended timeout...');
         this.queue = await this.prisma.driver.findMany({
           where: { status: 'AVAILABLE' },
           orderBy: { priority: 'asc' },
         });
+        await this.cacheManager.set('driverQueue', this.queue, 600);
         this.notifyDriver(orderId, true);
       } else {
         console.log('No drivers available for the order.');
@@ -105,9 +131,26 @@ export class RideService {
     }
 
     const driver = this.queue.shift();
+    await this.cacheManager.set('driverQueue', this.queue, 600);
+
+    const existingNotification = await this.prisma.notification.findFirst({
+      where: {
+        driverId: driver.id,
+        orderId,
+        status: 'PENDING',
+      },
+    });
+
+    if (existingNotification) {
+      console.log(
+        `Driver ${driver.name} has already been notified for order ${orderId}`,
+      );
+      this.notifyDriver(orderId, retry);
+      return;
+    }
+
     console.log(`Notifying driver ${driver.name} for order ${orderId}`);
 
-    // Create a notification for the driver
     await this.prisma.notification.create({
       data: {
         orderId,
@@ -148,25 +191,5 @@ export class RideService {
     });
     if (!order) throw new NotFoundException('Order not found');
     return order;
-  }
-
-  async createRider(createRiderDto: CreateRiderDto) {
-    const data: Prisma.DriverCreateInput = {
-      name: createRiderDto.name,
-      priority: 0,
-    };
-    return await this.prisma.driver.create({ data });
-  }
-
-  async getAllRiders() {
-    return this.prisma.driver.findMany();
-  }
-
-  async getRiderById(riderId: number) {
-    const rider = await this.prisma.driver.findUnique({
-      where: { id: riderId },
-    });
-    if (!rider) throw new NotFoundException('Rider not found');
-    return rider;
   }
 }

@@ -1,42 +1,46 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from 'nestjs-prisma';
-import { CreateOrderDto } from './createOrder.dto';
-import { Driver } from '@prisma/client';
-import { RideService } from 'src/riders/riders.service';
-
+import { Driver, Order } from '@prisma/client';
+import { CACHE_MANAGER } from '@nestjs/cache-manager';
+import { Cache } from 'cache-manager';
 @Injectable()
 export class OrderService {
   private queue: Driver[] = [];
 
   constructor(
-    private readonly prisma: PrismaService,
-    private readonly rideService: RideService,
+    private prisma: PrismaService,
+    @Inject(CACHE_MANAGER) private cacheManager: Cache,
   ) {}
+  async createOrder(
+    origin: string,
+    destination: string,
+    customer: string,
+  ): Promise<any> {
+    const order = await this.prisma.order.create({
+      data: { customer, destination, origin, status: 'PENDING' },
+    });
 
-  async createOrder(createOrderDto: CreateOrderDto) {
-    const newOrder = await this.prisma.order.create({
+    await this.prisma.logEntry.create({
       data: {
-        origin: createOrderDto.origin,
-        destination: createOrderDto.destination,
-        customer: createOrderDto.customer,
-        status: 'PENDING',
+        orderId: order.id,
+        action: 'Order created',
       },
     });
+    this.queue = await this.cacheManager.get<Driver[]>('driverQueue');
 
-    await this.logOrderAction(newOrder.id, 'Order created');
-
-    const firstDriver = await this.prisma.driver.findFirst({
-      where: { status: 'AVAILABLE' },
-      orderBy: { priority: 'asc' },
-    });
-
-    if (firstDriver) {
-      await this.rideService.notifyDriver(newOrder.id);
+    if (!this.queue || this.queue.length === 0) {
+      this.queue = await this.prisma.driver.findMany({
+        where: { status: 'AVAILABLE' },
+        orderBy: { priority: 'asc' },
+      });
+      await this.cacheManager.set('driverQueue', this.queue, 600);
     }
+
+    this.notifyDriver(order.id);
 
     return {
       status: 'Order created',
-      order_id: newOrder.id,
+      order_id: order.id,
     };
   }
 
@@ -46,6 +50,18 @@ export class OrderService {
     response: string,
   ) {
     await this.getOrderById(orderId);
+
+    const notification = await this.prisma.notification.findFirst({
+      where: {
+        orderId,
+        driverId,
+        status: 'PENDING',
+      },
+    });
+
+    if (!notification) {
+      throw new Error(`Driver ${driverId} was not notified`);
+    }
 
     if (response === 'accept') {
       await this.assignOrderToDriver(orderId, driverId);
@@ -149,7 +165,6 @@ export class OrderService {
         },
         take: 1,
       });
-
       if (availableDrivers.length > 0) {
         waiting_driver = availableDrivers[0].id;
       }

@@ -21,7 +21,11 @@ export class OrderController {
 
   @Post('new')
   async createOrder(@Body() createOrderDto: CreateOrderDto) {
-    return this.orderService.createOrder(createOrderDto);
+    return this.orderService.createOrder(
+      createOrderDto.customer,
+      createOrderDto.destination,
+      createOrderDto.origin,
+    );
   }
 
   // @Post('driver/respond')
